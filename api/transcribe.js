@@ -1,6 +1,4 @@
-// /api/transcribe.js  (Node.js 18+)
-export const config = { runtime: 'nodejs18.x' };
-
+// /api/transcribe.js
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
@@ -14,11 +12,9 @@ export default async function handler(req, res) {
 
     const push = (arr, s) => arr.push(Buffer.from(s));
     const parts = [];
-    // fields
     for (const [k, v] of Object.entries({ model: 'whisper-1', language })) {
       push(parts, `--${boundary}${CRLF}Content-Disposition: form-data; name="${k}"${CRLF}${CRLF}${v}${CRLF}`);
     }
-    // file
     push(parts, `--${boundary}${CRLF}Content-Disposition: form-data; name="file"; filename="${filename}"${CRLF}`);
     push(parts, `Content-Type: ${mime}${CRLF}${CRLF}`);
     parts.push(Buffer.from(base64, 'base64'));
@@ -39,8 +35,7 @@ export default async function handler(req, res) {
     }
 
     const json = await r.json();
-    // CORS (Wix から呼ぶ場合のために許可)
-    res.setHeader('Access-Control-Allow-Origin', 'https://www.atozenglish.co.jp');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'content-type');
     return res.status(200).json({ text: json.text || '' });
   } catch (e) {
