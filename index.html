@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Listen → Answer → Grade</title>
+<title>Listen → Answer → Grade (multi)</title>
 <style>
   body{font:16px/1.6 system-ui,sans-serif;max-width:780px;margin:24px auto;padding:0 16px}
   .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
@@ -11,14 +11,18 @@
   #score{font-weight:700;margin-top:12px}
   .ok{color:#0a7a0a}.ng{color:#c01818}
   #q{font-size:18px;margin:6px 0 12px}
+  #prog{opacity:.7}
 </style>
 
-<h2>Question</h2>
-<div id="q"></div>
+<h2>Question <span id="prog"></span></h2>
+<div id="q">Loading...</div>
+
 <div class="row">
+  <button id="prev">⟵ Prev</button>
   <button id="play">🔊 Play</button>
   <button id="rec">🎤 Start</button>
   <button id="grade">✅ Grade</button>
+  <button id="next">Next ⟶</button>
 </div>
 
 <div id="live"></div>
@@ -26,163 +30,116 @@
 <div id="score"></div>
 
 <script>
-/* ====== ここから置換 ====== */
+/* ===== 設定 ===== */
 const SHEET_CSV =
   'https://docs.google.com/spreadsheets/d/e/2PACX-1vRVC56sLRh94LTed5WD4sVkIojw00CTlBL7yPtJocPewWqQ-ODfFsmLx_k9BX3LOmNT8ztP4GwqJVfl/pub?gid=0&single=true&output=csv';
-
-let QUESTION_TEXT = 'Loading...';
-let ANSWER_KEY = '';
 const STT_API = '/api/transcribe';
+const LANG_VOICE = 'en-US';     // TTS/暫定字幕の言語
+const LANG_WHISPER = 'en';      // Whisper言語
 
-async function loadSheet() {
-  const csv = await (await fetch(SHEET_CSV, { cache: 'no-store' })).text();
-  // カンマ(ダブルクオート内は除外)で分割
+/* ===== CSV 読込 ===== */
+let items = []; // [{q, a}]
+let idx = 0;
+
+(async function loadSheet(){
+  const csv = await (await fetch(SHEET_CSV,{cache:'no-store'})).text();
   const rows = csv.trim().split(/\r?\n/).map(
     line => line.match(/("([^"]|"")*"|[^,]*)/g)
-                 .filter(s => s !== '')
-                 .map(s => s.replace(/^"|"$/g,'').replace(/""/g,'"'))
+      .filter(s => s!=='')
+      .map(s => s.replace(/^"|"$/g,'').replace(/""/g,'"'))
   );
-  const header = rows[0].map(h => h.trim().toLowerCase());
+  const header = rows[0].map(h=>h.trim().toLowerCase());
   const qi = header.indexOf('question');
   const ai = header.indexOf('answer');
-  if (qi < 0 || ai < 0 || rows.length < 2) {
-    throw new Error('Sheet must have "Question" and "Answer" columns with at least 1 row');
-  }
-  const first = rows[1];                // 先頭のデータ行を使用（必要なら行を変えてください）
-  QUESTION_TEXT = first[qi] || '';
-  ANSWER_KEY = (first[ai] || '').toLowerCase();
-
-  document.getElementById('q').textContent = QUESTION_TEXT;
-}
-loadSheet().catch(e => {
-  document.getElementById('q').textContent = 'Load error: ' + e.message;
+  if(qi<0 || ai<0 || rows.length<2) throw new Error('Sheet needs Question/Answer columns');
+  items = rows.slice(1).map(r=>({ q:r[qi]||'', a:(r[ai]||'').toLowerCase() }));
+  idx = 0;
+  render();
+})().catch(e=>{
+  document.getElementById('q').textContent = 'Load error: '+e.message;
 });
-/* ====== 置換ここまで ====== */
 
-/* ====== 出題表示 ====== */
-document.getElementById('q').textContent = QUESTION_TEXT;
+/* ===== 画面更新 ===== */
+function render(){
+  stop(true);
+  const total = items.length||0;
+  document.getElementById('q').textContent = items[idx]?.q || '(no question)';
+  document.getElementById('prog').textContent = total?`(${idx+1}/${total})`:'';
+  document.getElementById('score').textContent='';
+  document.getElementById('score').className='';
+  document.getElementById('final').textContent='';
+  document.getElementById('live').textContent='';
+}
 
-/* ====== TTS（Web Speech API） ====== */
-const playBtn = document.getElementById('play');
-playBtn.onclick = () => {
-  const u = new SpeechSynthesisUtterance(QUESTION_TEXT);
-  // 英語で出題する想定（日本語化したい場合は 'ja-JP'）
-  u.lang = 'en-US';
-  speechSynthesis.cancel();
-  speechSynthesis.speak(u);
+/* ===== TTS ===== */
+document.getElementById('play').onclick = ()=>{
+  const u = new SpeechSynthesisUtterance(items[idx]?.q || '');
+  u.lang = LANG_VOICE;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
 };
 
-/* ====== 暫定字幕 + 録音 → Whisper ====== */
-let stream, rec, chunks=[], timer, recognizing=false, recog;
+/* ===== 録音/STT ===== */
+let stream, rec, chunks=[], timer, recognizing=false, recog, confirmed='', interim='';
 const live = document.getElementById('live');
 const finalEl = document.getElementById('final');
-const scoreEl = document.getElementById('score');
-let confirmed = '';   // Whisperの確定テキストを蓄積
-let interim   = '';   // 暫定字幕
-
 const recBtn = document.getElementById('rec');
+
 recBtn.onclick = async ()=>{ if(!rec || rec.state==='inactive') start(); else stop(); };
 
 async function start(){
-  scoreEl.textContent = '';
-  confirmed = interim = '';
-  finalEl.textContent = ''; live.textContent = '';
-
-  // 暫定字幕（ブラウザ内）
+  confirmed = interim = ''; finalEl.textContent=''; live.textContent='';
   if('webkitSpeechRecognition'in window || 'SpeechRecognition'in window){
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recog = new SR();
-    recog.lang = 'en-US';            // ←英語練習。日本語にしたい時は 'ja-JP'
-    recog.interimResults = true;
-    recog.continuous = true;
+    recog = new SR(); recog.lang = LANG_VOICE; recog.interimResults = true; recog.continuous = true;
     recog.onresult = e=>{
-      let tmp='';
-      for(let i=e.resultIndex;i<e.results.length;i++){
-        const r=e.results[i];
-        if(r.isFinal){ confirmed += (r[0].transcript + '\n'); }
-        else{ tmp += r[0].transcript; }
-      }
-      interim = tmp;
-      live.textContent = interim;
-      finalEl.textContent = confirmed;
+      let tmp=''; for(let i=e.resultIndex;i<e.results.length;i++){ const r=e.results[i];
+        if(r.isFinal){ confirmed += r[0].transcript + '\n'; } else { tmp += r[0].transcript; } }
+      interim = tmp; live.textContent = interim; finalEl.textContent = confirmed;
     };
     try{ recog.start(); recognizing=true; }catch{}
   }
-
-  // 録音（3秒ごとにWhisperへ）
   stream = await navigator.mediaDevices.getUserMedia({audio:true});
   const mime = MediaRecorder.isTypeSupported('audio/webm')?'audio/webm':'audio/ogg';
-  rec = new MediaRecorder(stream,{mimeType:mime});
-  chunks=[];
+  rec = new MediaRecorder(stream,{mimeType:mime}); chunks=[];
   rec.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
-  rec.start();
-
-  timer = setInterval(sendChunk, 3000);
-  recBtn.textContent = '🟥 Stop';
+  rec.start(); timer = setInterval(sendChunk,3000);
+  recBtn.textContent='🟥 Stop';
 }
-
-async function stop(){
+async function stop(silent=false){
   clearInterval(timer);
   if(rec && rec.state!=='inactive') rec.stop();
   if(stream) stream.getTracks().forEach(t=>t.stop());
-  if(recognizing && recog){ try{ recog.stop(); }catch{} }
-  recBtn.textContent='🎤 Start';
-  if(chunks.length) await sendChunk(); // 残りを送信
+  if(recognizing && recog){ try{ recog.stop(); }catch{} recognizing=false; }
+  if(!silent) recBtn.textContent='🎤 Start';
+  if(chunks.length && !silent) await sendChunk();
 }
-
-function toBase64(blob){
-  return new Promise((res,rej)=>{
-    const r=new FileReader();
-    r.onloadend=()=>res(r.result);
-    r.onerror=rej;
-    r.readAsDataURL(blob);
-  });
-}
-
+function toBase64(blob){return new Promise((res,rej)=>{const r=new FileReader();r.onloadend=()=>res(r.result);r.onerror=rej;r.readAsDataURL(blob);});}
 async function sendChunk(){
   if(!chunks.length) return;
   const blob = new Blob(chunks.splice(0, chunks.length), { type: rec.mimeType });
   const b64 = await toBase64(blob);
   const r = await fetch(STT_API,{method:'POST',headers:{'content-type':'application/json'},
-    body: JSON.stringify({ base64: b64.split(',')[1], mime: rec.mimeType, language: 'en' })});
+    body: JSON.stringify({ base64: b64.split(',')[1], mime: rec.mimeType, language: LANG_WHISPER })});
   const j = await r.json().catch(()=>({}));
   if(j && j.text){ confirmed += j.text + '\n'; finalEl.textContent = confirmed; }
 }
 
-/* ====== 採点 ====== */
-const gradeBtn = document.getElementById('grade');
-gradeBtn.onclick = ()=>{
+/* ===== 採点 ===== */
+document.getElementById('grade').onclick = ()=>{
   const cand = normalize((confirmed || interim || '').trim());
-  const gold = normalize(ANSWER_KEY);
-  const sim = similarity(cand, gold);   // 0〜1
-  const ok  = sim >= 0.85;              // しきい値（必要なら調整）
-  scoreEl.className = ok ? 'ok' : 'ng';
+  const gold = normalize(items[idx]?.a || '');
+  const sim = similarity(cand,gold);
+  const ok = sim>=0.85;
+  const scoreEl = document.getElementById('score');
+  scoreEl.className = ok?'ok':'ng';
   scoreEl.textContent = ok
     ? `✔ Correct (similarity ${Math.round(sim*100)}%)`
     : `✖ Try again (similarity ${Math.round(sim*100)}%)\nYour answer: ${cand}\nExpected: ${gold}`;
 };
+function normalize(s){return s.toLowerCase().replace(/[^\p{Letter}\p{Number}\s]/gu,'').replace(/\s+/g,' ').trim();}
+function similarity(a,b){const m=a.length,n=b.length;if(!m&&!n)return 1;const d=Array.from({length:m+1},(_,i)=>[i]);for(let j=1;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++){for(let j=1;j<=n;j++){const c=a[i-1]===b[j-1]?0:1;d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+c);}}const dist=d[m][n];return 1-dist/Math.max(m,n);}
 
-function normalize(s){
-  return s.toLowerCase()
-    .replace(/[^\p{Letter}\p{Number}\s]/gu,'') // 記号除去
-    .replace(/\s+/g,' ')
-    .trim();
-}
-
-// レーベンシュタイン距離→類似度
-function similarity(a,b){
-  const m=a.length,n=b.length;
-  if(!m && !n) return 1;
-  const dp=Array.from({length:m+1},(_,i)=>[i]);
-  for(let j=1;j<=n;j++) dp[0][j]=j;
-  for(let i=1;i<=m;i++){
-    for(let j=1;j<=n;j++){
-      const cost = a[i-1]===b[j-1]?0:1;
-      dp[i][j]=Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
-    }
-  }
-  const dist=dp[m][n];
-  const maxLen=Math.max(m,n);
-  return 1 - dist/maxLen;
-}
+/* ===== ナビゲーション ===== */
+document.getElementById('next').onclick = ()=>{ if(!items.length) return; idx = (idx+1)%items.length; render(); };
+document.getElementById('prev').onclick = ()=>{ if(!items.length) return; idx = (idx-1+items.length)%items.length; render(); };
 </script>
