@@ -31,7 +31,7 @@ async function start() {
   if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     recog = new SR();
-    recog.lang = 'ja-JP';
+    recog.lang = 'en-US';
     recog.interimResults = true;
     recog.continuous = true;
     recog.onresult = (e) => {
