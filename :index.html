@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Recorder + Whisper</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  #rec { padding: 10px 20px; border-radius: 999px; border: 1px solid #ddd; cursor: pointer; }
+  #live { opacity: .6; white-space: pre-wrap; }
+  #final { margin-top: 12px; white-space: pre-wrap; }
+</style>
+
+<button id="rec">🎤 Start</button>
+<div id="live"></div>
+<div id="final"></div>
+
+<script>
+const API = '/api/transcribe'; // Vercel 同一ドメインで動作
+let stream, rec, chunks=[], timer;
+let recognizing=false, recog, interim='', confirmed='';
+
+const live = document.getElementById('live');
+const finalEl = document.getElementById('final');
+const btn = document.getElementById('rec');
+
+btn.onclick = async () => {
+  if (!rec || rec.state === 'inactive') start(); else stop();
+};
+
+async function start() {
+  // 暫定字幕（Web Speech API）
+  if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recog = new SR();
+    recog.lang = 'ja-JP';
+    recog.interimResults = true;
+    recog.continuous = true;
+    recog.onresult = (e) => {
+      let tmp = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) { confirmed += r[0].transcript; confirmed += '\n'; }
+        else { tmp += r[0].transcript; }
+      }
+      live.textContent = tmp;
+      finalEl.textContent = confirmed;
+    };
+    recog.onerror = () => {};
+    recog.start();
+    recognizing = true;
+  }
+
+  // 録音開始（3秒ごとに Whisper へ）
+  stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg';
+  rec = new MediaRecorder(stream, { mimeType: mime });
+  chunks = [];
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.start();
+
+  // 3秒ごとに確定化
+  timer = setInterval(async () => {
+    if (!chunks.length) return;
+    const blob = new Blob(chunks.splice(0, chunks.length), { type: rec.mimeType });
+    const b64 = await toBase64(blob);
+    const res = await fetch(API, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ base64: b64.split(',')[1], mime: rec.mimeType, language: 'ja' }) });
+    const j = await res.json();
+    if (j.text) { confirmed += j.text + '\n'; finalEl.textContent = confirmed; }
+  }, 3000);
+
+  btn.textContent = '🟥 Stop';
+}
+
+async function stop() {
+  clearInterval(timer);
+  if (rec && rec.state !== 'inactive') rec.stop();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (recognizing && recog) { try { recog.stop(); } catch {} }
+  btn.textContent = '🎤 Start';
+
+  // 残ったチャンクを最終送信
+  if (chunks.length) {
+    const blob = new Blob(chunks.splice(0, chunks.length), { type: rec.mimeType });
+    const b64 = await toBase64(blob);
+    const res = await fetch(API, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ base64: b64.split(',')[1], mime: rec.mimeType, language: 'ja' }) });
+    const j = await res.json();
+    if (j.text) { confirmed += j.text + '\n'; finalEl.textContent = confirmed; }
+  }
+}
+
+function toBase64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onloadend = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob);
+  });
+}
+</script>
