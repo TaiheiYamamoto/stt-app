@@ -124,17 +124,20 @@ async function sendChunk(){
   if(j && j.text){ confirmed += j.text + '\n'; finalEl.textContent = confirmed; }
 }
 
-/* ===== 採点 ===== */
-document.getElementById('grade').onclick = ()=>{
+/* ===== 採点（日本語表示） ===== */
+document.getElementById('grade').onclick = () => {
   const cand = normalize((confirmed || interim || '').trim());
   const gold = normalize(items[idx]?.a || '');
-  const sim = similarity(cand,gold);
-  const ok = sim>=0.85;
+  const sim = similarity(cand, gold);          // 0〜1
+  const ok  = sim >= 0.85;                     // しきい値はそのまま
+
   const scoreEl = document.getElementById('score');
-  scoreEl.className = ok?'ok':'ng';
+  scoreEl.className = ok ? 'ok' : 'ng';
+  const pct = Math.round(sim * 100);
+
   scoreEl.textContent = ok
-    ? `✔ Correct (similarity ${Math.round(sim*100)}%)`
-    : `✖ Try again (similarity ${Math.round(sim*100)}%)\nYour answer: ${cand}\nExpected: ${gold}`;
+    ? `✔ 正解（類似度 ${pct}%）`
+    : `✖ 不正解（類似度 ${pct}%）\nあなたの回答: ${cand}\n模範解答: ${gold}`;
 };
 function normalize(s){return s.toLowerCase().replace(/[^\p{Letter}\p{Number}\s]/gu,'').replace(/\s+/g,' ').trim();}
 function similarity(a,b){const m=a.length,n=b.length;if(!m&&!n)return 1;const d=Array.from({length:m+1},(_,i)=>[i]);for(let j=1;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++){for(let j=1;j<=n;j++){const c=a[i-1]===b[j-1]?0:1;d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+c);}}const dist=d[m][n];return 1-dist/Math.max(m,n);}
