@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>スピーキング練習（聴く→話す→採点）</title>
+<title>スピーキング練習（聴く→話す→チェック）</title>
 <style>
   :root{--fg:#0f172a;--muted:#64748b;--accent:#2563eb;--ok:#0a7a0a;--ng:#c01818;--bd:#e2e8f0;}
   *{box-sizing:border-box}
@@ -14,6 +14,7 @@
   .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
   .btn{appearance:none;border:1px solid var(--bd);background:#fff;color:var(--fg);padding:14px 20px;border-radius:999px;cursor:pointer;font-weight:700;font-size:18px;min-width:120px;box-shadow:0 1px 4px rgba(2,6,23,.04);transition:.15s}
   .btn:active{transform:translateY(1px)}
+  .btn[disabled]{opacity:.45;cursor:not-allowed;box-shadow:none}
   .btn-primary{background:var(--accent);color:#fff;border-color:transparent}
   .btn-ghost{background:#f8fafc}
   .btn-wide{min-width:140px}
@@ -25,31 +26,35 @@
   .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--bd);padding:2px 6px;border-radius:6px;background:#f8fafc}
   .qrow{display:flex;align-items:flex-end;justify-content:space-between;gap:12px}
   .qrow h1{margin:0}
+  #timer{font-size:13px;color:var(--muted)}
   @media (hover:hover){.btn:hover{box-shadow:0 3px 10px rgba(2,6,23,.08)}}
 </style>
 
 <div class="wrap">
-  <!-- 使い方 -->
+  <!-- 使い方 + タイマー -->
   <header class="card">
-    <div class="progress">使い方</div>
-    <div class="hint">① <span class="kbd">再生</span>で問題を聞く → ② <span class="kbd">録音開始</span>で答える → ③ <span class="kbd">採点</span>で結果を見る</div>
+    <div class="progress" style="display:flex;justify-content:space-between;align-items:center">
+      <span>使い方</span>
+      <span id="timer">—</span>
+    </div>
+    <div class="hint">① <span class="kbd">再生</span>で問題を聞く → ② <span class="kbd">録音開始</span>で答える → ③ <span class="kbd">チェック</span>で結果を見る（合格すると「次へ」が有効）</div>
   </header>
 
   <!-- 出題 -->
   <section class="card">
     <div class="progress">問題 <span id="prog"></span></div>
 
-    <!-- 再生ボタンを問題文の右へ -->
+    <!-- 問題文（右側の再生ボタンはやめ、下の操作列の左に配置） -->
     <div class="qrow">
       <h1 id="q">Loading...</h1>
-      <button id="play" class="btn btn-ghost">🔊 再生</button>
     </div>
 
+    <!-- 操作列：左から「再生」「録音開始」「チェック」「次へ」 -->
     <div class="row" style="margin-top:8px">
-      <button id="prev" class="btn btn-ghost">⟵ 前へ</button>
+      <button id="play" class="btn btn-ghost">🔊 再生</button>
       <button id="rec"  class="btn btn-primary btn-wide">🎤 録音開始</button>
-      <button id="grade" class="btn btn-ghost">✅ 採点</button>
-      <button id="next" class="btn btn-ghost">次へ ⟶</button>
+      <button id="grade" class="btn btn-ghost">✅ チェック</button>
+      <button id="next" class="btn btn-ghost" disabled>次へ ⟶</button>
     </div>
 
     <div id="live"></div>
@@ -62,6 +67,12 @@
     <div class="progress">ヒント</div>
     <div class="hint">音量が小さいと認識精度が落ちます。はっきり・区切って話しましょう。録音中はボタンが「🟥 録音中」に変わります。</div>
   </footer>
+
+  <!-- チェック後に表示する日本語訳 -->
+  <section id="jaCard" class="card" style="display:none">
+    <div class="progress">質問の意味（日本語訳）</div>
+    <div id="ja" class="hint"></div>
+  </section>
 </div>
 
 <script>
@@ -70,16 +81,18 @@ const SHEET_CSV='https://docs.google.com/spreadsheets/d/e/2PACX-1vRVC56sLRh94LTe
 const STT_API='/api/transcribe';
 const LANG_VOICE='en-US';      // TTS/暫定字幕
 const LANG_WHISPER='en';       // Whisper
+const PASS_THRESHOLD = 0.80;   // 80% 以上で合格
 
 /* ===== CSV 読込 ===== */
-let items=[],idx=0;
+let items=[],idx=0, solved=[], startTime=null, timerId=null;
 (async function loadSheet(){
   const csv=await (await fetch(SHEET_CSV,{cache:'no-store'})).text();
   const rows=csv.trim().split(/\r?\n/).map(line=>line.match(/("([^"]|"")*"|[^,]*)/g).filter(s=>s!=='').map(s=>s.replace(/^"|"$/g,'').replace(/""/g,'"')));
   const header=rows[0].map(h=>h.trim().toLowerCase());
-  const qi=header.indexOf('question'), ai=header.indexOf('answer');
+  const qi=header.indexOf('question'), ai=header.indexOf('answer'), ji=header.indexOf('japanese');
   if(qi<0||ai<0||rows.length<2) throw new Error('Sheet needs Question/Answer columns');
-  items=rows.slice(1).map(r=>({q:r[qi]||'', a:(r[ai]||'').toLowerCase()}));
+  items=rows.slice(1).map(r=>({q:r[qi]||'', a:(r[ai]||'').toLowerCase(), j:r[ji]||''}));
+  solved = items.map(()=>false);
   idx=0; render();
 })().catch(e=>{document.getElementById('q').textContent='Load error: '+e.message;});
 
@@ -90,12 +103,34 @@ function render(){
   document.getElementById('q').textContent=items[idx]?.q||'(no question)';
   document.getElementById('prog').textContent=total?`${idx+1}/${total}`:'';
   setScore('');
+  setJapanese(null, false);
+  setNextEnabled(solved[idx] === true);   // 既に合格済みなら次へOK、初見はNG
 }
 
-/* ===== TTS（再生） ===== */
+/* ===== TTS（自然な声を優先選択） ===== */
+let preferredVoice = null;
+function pickVoice() {
+  const voices = speechSynthesis.getVoices();
+  // 好みの順に選ぶ（ブラウザやOSにより名称が異なるため候補を列挙）
+  const preferredNames = [
+    'Google US English', 'Google UK English Female', 'Samantha', 'Karen',
+    'Daniel', 'Alex', 'Victoria', 'Moira'
+  ];
+  preferredVoice =
+    voices.find(v => preferredNames.includes(v.name) && v.lang.startsWith('en')) ||
+    voices.find(v => v.lang === LANG_VOICE) ||
+    voices[0] || null;
+}
+speechSynthesis.onvoiceschanged = pickVoice;
+pickVoice();
+
 document.getElementById('play').onclick=()=>{
   const u=new SpeechSynthesisUtterance(items[idx]?.q||'');
-  u.lang=LANG_VOICE; speechSynthesis.cancel(); speechSynthesis.speak(u);
+  u.lang=LANG_VOICE;
+  if (preferredVoice) u.voice = preferredVoice;
+  u.rate = 0.95;   // 少しゆっくり＆自然寄せ
+  u.pitch = 1.0;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
 };
 
 /* ===== 録音/STT ===== */
@@ -103,11 +138,19 @@ let stream,rec,chunks=[],timer,recognizing=false,recog,confirmed='',interim='';
 const live=document.getElementById('live');
 const finalEl=document.getElementById('final');
 const recBtn=document.getElementById('rec');
+const nextBtn=document.getElementById('next');
 
 recBtn.onclick=async()=>{ if(!rec||rec.state==='inactive') start(); else stop(); };
+nextBtn.onclick=()=>{ if(nextBtn.disabled) return; idx=(idx+1)%items.length; render(); };
 
 async function start(){
+  // タイマー開始（最初の録音開始でスタート）
+  if (!startTime) { startTime = Date.now(); startTicker(); }
+
   confirmed=interim=''; finalEl.textContent=''; live.textContent=''; setScore('');
+  setJapanese(null,false);
+  setNextEnabled(false);
+
   if('webkitSpeechRecognition'in window||'SpeechRecognition'in window){
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     recog=new SR(); recog.lang=LANG_VOICE; recog.interimResults=true; recog.continuous=true;
@@ -144,21 +187,44 @@ async function sendChunk(){
   if(j&&j.text){confirmed+=j.text+'\n'; finalEl.textContent=confirmed;}
 }
 
-/* ===== 採点（日本語表示） ===== */
+/* ===== チェック（日本語表示・次へ制御） ===== */
 document.getElementById('grade').onclick=()=>{
   const cand=normalize((confirmed||interim||'').trim());
   const gold=normalize(items[idx]?.a||'');
   const sim=similarity(cand,gold);
-  const ok=sim>=0.85;
-  setScore(ok?`✔ 正解（類似度 ${Math.round(sim*100)}%）`
-              :`✖ 不正解（類似度 ${Math.round(sim*100)}%）\nあなたの回答: ${cand}\n模範解答: ${gold}`,
+  const ok=sim>=PASS_THRESHOLD;
+
+  // 合否表示（合格／残念💦）
+  setScore(ok?`✔ 合格（類似度 ${Math.round(sim*100)}%）`
+              :`残念💦（類似度 ${Math.round(sim*100)}%）\nあなたの回答: ${cand}\n模範解答: ${gold}`,
            ok?'ok':'ng');
+
+  // 日本語訳の表示
+  setJapanese(items[idx]?.j || '(日本語訳が未設定です)', true);
+
+  // 次へボタン制御と完了判定
+  solved[idx] = ok || solved[idx];        // 一度合格したら維持
+  setNextEnabled(solved[idx]);
+  checkAllSolved();
 };
+
+function setNextEnabled(enable){
+  nextBtn.disabled = !enable;
+}
+
 function setScore(text,cls){const el=document.getElementById('score'); el.className=cls||''; el.textContent=text;}
+
+function setJapanese(text, show){
+  const card = document.getElementById('jaCard');
+  const box  = document.getElementById('ja');
+  if (show && text) { box.textContent = text; card.style.display = ''; }
+  else { box.textContent = ''; card.style.display = 'none'; }
+}
+
 function normalize(s){return s.toLowerCase().replace(/[^\p{Letter}\p{Number}\s]/gu,'').replace(/\s+/g,' ').trim();}
 function similarity(a,b){const m=a.length,n=b.length;if(!m&&!n)return 1;const d=Array.from({length:m+1},(_,i)=>[i]);for(let j=1;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++){for(let j=1;j<=n;j++){const c=a[i-1]===b[j-1]?0:1;d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+c);}}const dist=d[m][n];return 1-dist/Math.max(m,n);}
 
-/* ===== ナビゲーション ===== */
-document.getElementById('next').onclick=()=>{if(!items.length)return; idx=(idx+1)%items.length; render();};
-document.getElementById('prev').onclick=()=>{if(!items.length)return; idx=(idx-1+items.length)%items.length; render();};
-</script>
+/* ===== タイマー（開始〜全問合格の合計時間） ===== */
+function startTicker(){
+  const el = document.getElementById('timer');
+  function tick
