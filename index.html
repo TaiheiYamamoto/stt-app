@@ -66,44 +66,52 @@
 </div>
 
 <script>
-/* ===== 基本設定 ===== */
-const SHEET_GVIZ =
-  'https://docs.google.com/spreadsheets/d/e/2PACX-1vRVC56sLRh94LTed5WD4sVkIojw00CTlBL7yPtJocPewWqQ-ODfFsmLx_k9BX3LOmNT8ztP4GwqJVfl/gviz/tq?gid=0&tqx=out:json';
+/* ===== 設定 ===== */
+const GVIZ_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vRVC56sLRh94LTed5WD4sVkIojw00CTlBL7yPtJocPewWqQ-ODfFsmLx_k9BX3LOmNT8ztP4GwqJVfl/gviz/tq?gid=0&tqx=out:json';
 const STT_API='/api/transcribe';
 const LANG_VOICE='en-US';
 const LANG_WHISPER='en';
-const PASS_THRESHOLD = 0.80;
+const PASS_THRESHOLD=0.80;
 
-/* ===== データ状態 ===== */
 let items=[], idx=0, passFlags=[], sessionStart=null;
 
-/* ===== GViz JSON 読み込み ===== */
+/* ===== GViz を “1行目をヘッダー” として解釈 ===== */
 (async function loadSheet(){
   try{
-    const res = await fetch(SHEET_GVIZ, { cache:'no-store' });
+    const res=await fetch(GVIZ_URL+'&_ts='+(Date.now())); // キャッシュバスター
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();            // 形式: google.visualization.Query.setResponse({...});
-    const json = JSON.parse(text.substring(text.indexOf('{'), text.lastIndexOf('}')+1));
-    if(json.status !== 'ok') throw new Error('GViz status: '+json.status);
+    const text=await res.text();
+    const json=JSON.parse(text.substring(text.indexOf('{'), text.lastIndexOf('}')+1));
+    if(json.status!=='ok') throw new Error('GViz status: '+json.status);
 
-    const table = json.table;
-    const headers = table.cols.map(c => (c.label||'').toLowerCase());
-    const qi = headers.indexOf('question');
-    const ai = headers.indexOf('answer');
-    const ji = headers.indexOf('japanese');
-    if(qi<0 || ai<0) throw new Error('ヘッダに Question / Answer が見つかりません');
+    // rows を 2次元配列に
+    const rows = (json.table.rows||[]).map(r => (r.c||[]).map(c => c && c.v!=null ? String(c.v) : ''));
+    if(!rows.length) throw new Error('データが空です');
 
-    items = table.rows.map(r=>{
-      const cell = i => (r.c[i] && r.c[i].v != null) ? String(r.c[i].v) : '';
-      return { q: cell(qi), a: cell(ai).toLowerCase(), j: ji>=0 ? cell(ji) : '' };
-    }).filter(x => x.q || x.a);
-    if(!items.length) throw new Error('データが空です');
+    // 1行目をヘッダーとして探す
+    const header = rows[0].map(s => s.trim().toLowerCase());
+    let qi = header.indexOf('question');
+    let ai = header.indexOf('answer');
+    let ji = header.indexOf('japanese');
+
+    let dataRows;
+    if(qi>=0 && ai>=0){                // 1行目がヘッダー
+      dataRows = rows.slice(1);
+    }else{                             // フォールバック：A=Q, B=A, C=J と見なす
+      qi=0; ai=1; ji=2;
+      dataRows = rows;
+    }
+
+    items = dataRows
+      .filter(r => (r[qi]||'').trim() || (r[ai]||'').trim())
+      .map(r => ({ q: r[qi]||'', a: (r[ai]||'').toLowerCase(), j: ji!=null ? (r[ji]||'') : '' }));
+
+    if(!items.length) throw new Error('有効な行がありません');
 
     passFlags = items.map(()=>false);
-    idx = 0;
-    render();
+    idx=0; render();
   }catch(e){
-    console.error('GViz load error:', e);
+    console.error('Sheet load error:', e);
     document.getElementById('q').textContent = 'Load error: ' + e.message;
   }
 })();
@@ -118,21 +126,20 @@ function render(){
   document.getElementById('jaCard').style.display='none';
 }
 
-/* ===== TTS（より自然な声を優先） ===== */
+/* ===== TTS（自然な声を優先） ===== */
 let preferredVoice=null;
 function chooseVoice(lang){
-  const list = speechSynthesis.getVoices().filter(v => v.lang && v.lang.startsWith(lang));
-  return list.find(v => /google|natural|premium|neural/i.test(v.name)) || list[0] || null;
+  const list=speechSynthesis.getVoices().filter(v=>v.lang&&v.lang.startsWith(lang));
+  return list.find(v=>/google|natural|premium|neural/i.test(v.name)) || list[0] || null;
 }
-speechSynthesis.onvoiceschanged = ()=>{ preferredVoice = chooseVoice(LANG_VOICE); };
+speechSynthesis.onvoiceschanged=()=>{ preferredVoice = chooseVoice(LANG_VOICE); };
 
 document.getElementById('play').onclick=()=>{
   if(!sessionStart) sessionStart = Date.now();
-  const u = new SpeechSynthesisUtterance(items[idx]?.q||'');
-  u.lang = LANG_VOICE;
-  if(!preferredVoice) preferredVoice = chooseVoice(LANG_VOICE);
-  if(preferredVoice) u.voice = preferredVoice;
-  u.rate = 1; u.pitch = 1;
+  const u=new SpeechSynthesisUtterance(items[idx]?.q||'');
+  u.lang=LANG_VOICE; if(!preferredVoice) preferredVoice=chooseVoice(LANG_VOICE);
+  if(preferredVoice) u.voice=preferredVoice;
+  u.rate=1; u.pitch=1;
   speechSynthesis.cancel(); speechSynthesis.speak(u);
 };
 
@@ -184,7 +191,7 @@ async function sendChunk(){
   if(j&&j.text){confirmed+=j.text+'\n'; finalEl.textContent=confirmed;}
 }
 
-/* ===== チェック（80%以上→合格・次へ有効、日本語訳表示） ===== */
+/* ===== チェック（80%以上→合格／日本語訳表示／次へ有効） ===== */
 document.getElementById('grade').onclick=()=>{
   const cand=normalize((confirmed||interim||'').trim());
   const gold=normalize(items[idx]?.a||'');
@@ -207,17 +214,18 @@ function normalize(s){return s.toLowerCase().replace(/[^\p{Letter}\p{Number}\s]/
 function similarity(a,b){const m=a.length,n=b.length;if(!m&&!n)return 1;const d=Array.from({length:m+1},(_,i)=>[i]);for(let j=1;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++){for(let j=1;j<=n;j++){const c=a[i-1]===b[j-1]?0:1;d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+c);}}const dist=d[m][n];return 1-dist/Math.max(m,n);}
 
 /* 次へ（合格時のみ） */
-nextBtn.onclick=()=>{ if(nextBtn.disabled) return; if(idx < items.length-1){ idx++; render(); } else { maybeShowTime(); nextBtn.disabled=true; } };
+const nextBtn=document.getElementById('next');
+nextBtn.onclick=()=>{ if(nextBtn.disabled) return; if(idx<items.length-1){ idx++; render(); } else { maybeShowTime(); nextBtn.disabled=true; } };
 
 /* 全問終了の時間表示 */
 function maybeShowTime(){
   if(!sessionStart) return;
   if(passFlags.every(Boolean)){
-    const ms = Date.now() - sessionStart;
-    const mm = String(Math.floor(ms/60000)).padStart(2,'0');
-    const ss = String(Math.floor((ms%60000)/1000)).padStart(2,'0');
-    document.getElementById('timeText').textContent = `全 ${items.length} 問を完了！ かかった時間：${mm}:${ss}`;
-    document.getElementById('timeCard').style.display = 'block';
+    const ms=Date.now()-sessionStart;
+    const mm=String(Math.floor(ms/60000)).padStart(2,'0');
+    const ss=String(Math.floor((ms%60000)/1000)).padStart(2,'0');
+    document.getElementById('timeText').textContent=`全 ${items.length} 問を完了！ かかった時間：${mm}:${ss}`;
+    document.getElementById('timeCard').style.display='block';
   }
 }
 </script>
