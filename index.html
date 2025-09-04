@@ -1,29 +1,107 @@
-/* ===== シート読込：公開URL(2PACX)をTSVで読む ===== */
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>スピーキング練習（聴く→話す→チェック）</title>
+<style>
+  :root{--fg:#0f172a;--muted:#64748b;--accent:#2563eb;--ok:#0a7a0a;--ng:#c01818;--bd:#e2e8f0;}
+  *{box-sizing:border-box}
+  body{color:var(--fg);font:16px/1.7 system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans JP",sans-serif;margin:0;background:#fff;}
+  .wrap{max-width:860px;margin:24px auto 64px;padding:0 16px}
+  header.card,section.card,footer.card{background:#fff;border:1px solid var(--bd);border-radius:16px;padding:16px 20px;box-shadow:0 1px 8px rgba(2,6,23,.05);margin-bottom:16px}
+  h1{margin:0 0 6px 0;font-weight:800;letter-spacing:.2px;font-size:clamp(24px,4.5vw,42px)}
+  .progress{font-size:13px;color:var(--muted);margin-bottom:2px}
+  #q{font-size:clamp(22px,5vw,44px);font-weight:700;letter-spacing:.2px;margin:6px 0 10px}
+  .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  .btn{appearance:none;border:1px solid var(--bd);background:#fff;color:var(--fg);padding:14px 20px;border-radius:999px;cursor:pointer;font-weight:700;font-size:18px;min-width:120px;box-shadow:0 1px 4px rgba(2,6,23,.04);transition:.15s}
+  .btn:active{transform:translateY(1px)}
+  .btn-primary{background:var(--accent);color:#fff;border-color:transparent}
+  .btn-ghost{background:#f8fafc}
+  .btn-wide{min-width:140px}
+  .btn[disabled]{opacity:.45;cursor:not-allowed}
+  #live{opacity:.7;white-space:pre-wrap;margin-top:8px}
+  #final{white-space:pre-wrap;margin-top:8px}
+  #score{font-weight:800;margin-top:12px}
+  .ok{color:var(--ok)} .ng{color:var(--ng)}
+  .hint{color:var(--muted);font-size:14px}
+  .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--bd);padding:2px 6px;border-radius:6px;background:#f8fafc}
+  @media (hover:hover){.btn:hover{box-shadow:0 3px 10px rgba(2,6,23,.08)}}
+</style>
+
+<div class="wrap">
+  <!-- 使い方 -->
+  <header class="card">
+    <div class="progress">使い方</div>
+    <div class="hint">① <span class="kbd">再生</span>で問題を聞く → ② <span class="kbd">録音開始</span>で答える → ③ <span class="kbd">チェック</span>で結果を見る（合格すると「次へ」が有効）</div>
+  </header>
+
+  <!-- 出題 -->
+  <section class="card">
+    <div class="progress">問題 <span id="prog"></span></div>
+    <h1 id="q">Loading...</h1>
+
+    <div class="row" style="margin-top:8px">
+      <button id="play" class="btn btn-ghost">🔊 再生</button>
+      <button id="rec"  class="btn btn-primary btn-wide">🎤 録音開始</button>
+      <button id="grade" class="btn btn-ghost">✅ チェック</button>
+      <button id="next" class="btn btn-ghost" disabled>次へ ⟶</button>
+    </div>
+
+    <div id="live"></div>
+    <div id="final"></div>
+    <div id="score"></div>
+  </section>
+
+  <!-- 操作のヒント -->
+  <footer class="card">
+    <div class="progress">ヒント</div>
+    <div class="hint">音量が小さいと認識精度が落ちます。はっきり・区切って話しましょう。録音中はボタンが「🟥 録音中」に変わります。</div>
+  </footer>
+
+  <!-- 日本語訳 -->
+  <section class="card" id="jaCard" style="display:none;">
+    <div class="progress">質問の意味（日本語訳）</div>
+    <div id="jaText" class="hint"></div>
+  </section>
+
+  <!-- 全問終了の時間表示 -->
+  <section class="card" id="timeCard" style="display:none;">
+    <div class="progress">結果</div>
+    <div id="timeText"></div>
+  </section>
+</div>
+
+<script>
+/* ===== 設定 ===== */
 const SHEET_TSV =
   'https://docs.google.com/spreadsheets/d/e/2PACX-1vRVC56sLRh94LTed5WD4sVkIojw00CTlBL7yPtJocPewWqQ-ODfFsmLx_k9BX3LOmNT8ztP4GwqJVfl/pub?gid=0&single=true&output=tsv';
+const STT_API='/api/transcribe';
+const LANG_VOICE='en-US';
+const LANG_WHISPER='en';
+const PASS_THRESHOLD=0.80;
 
-let items = [], idx = 0, passFlags = [], sessionStart = null;
+/* ===== 状態 ===== */
+let items=[], idx=0, passFlags=[], sessionStart=null;
 
+/* ===== TSV読み込み（確実版） ===== */
 (async function loadSheet(){
   try{
     const res = await fetch(SHEET_TSV + '&_ts=' + Date.now(), { cache:'no-store' });
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const tsv = await res.text();
 
-    // TSV を安全に分割（カンマや引用符問題を回避）
     const rows = tsv.trim().split(/\r?\n/).map(line => line.split('\t'));
     const [header, ...data] = rows;
     const norm = s => String(s||'').trim().toLowerCase();
     const qi = header.findIndex(h => /question/.test(norm(h)));
     const ai = header.findIndex(h => /answer/.test(norm(h)));
     const ji = header.findIndex(h => /japanese/.test(norm(h)));
-    if (qi < 0 || ai < 0) throw new Error('ヘッダに Question / Answer がありません');
+    if(qi<0 || ai<0) throw new Error('ヘッダに Question / Answer がありません');
 
     items = data
       .map(r => ({ q: r[qi]||'', a: (r[ai]||'').toLowerCase(), j: ji>=0 ? (r[ji]||'') : '' }))
       .filter(x => x.q || x.a);
 
-    if (!items.length) throw new Error('有効な行がありません');
+    if(!items.length) throw new Error('有効な行がありません');
     passFlags = items.map(()=>false);
     idx = 0;
     render();
@@ -32,3 +110,116 @@ let items = [], idx = 0, passFlags = [], sessionStart = null;
     document.getElementById('q').textContent = 'Load error: ' + e.message;
   }
 })();
+
+/* ===== 画面更新 ===== */
+function render(){
+  stop(true);
+  const total=items.length||0;
+  document.getElementById('q').textContent=items[idx]?.q||'(no question)';
+  document.getElementById('prog').textContent=total?`${idx+1}/${total}`:'';
+  setScore(''); setNextEnabled(false);
+  document.getElementById('jaCard').style.display='none';
+}
+
+/* ===== TTS（自然な声を優先） ===== */
+let preferredVoice=null;
+function chooseVoice(lang){
+  const list=speechSynthesis.getVoices().filter(v=>v.lang&&v.lang.startsWith(lang));
+  return list.find(v=>/google|natural|premium|neural/i.test(v.name)) || list[0] || null;
+}
+speechSynthesis.onvoiceschanged=()=>{ preferredVoice = chooseVoice(LANG_VOICE); };
+
+document.getElementById('play').onclick=()=>{
+  if(!sessionStart) sessionStart = Date.now();
+  const u=new SpeechSynthesisUtterance(items[idx]?.q||'');
+  u.lang=LANG_VOICE; if(!preferredVoice) preferredVoice=chooseVoice(LANG_VOICE);
+  if(preferredVoice) u.voice=preferredVoice;
+  u.rate=1; u.pitch=1;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+};
+
+/* ===== 録音/STT ===== */
+let stream,rec,chunks=[],timer,recognizing=false,recog,confirmed='',interim='';
+const live=document.getElementById('live');
+const finalEl=document.getElementById('final');
+const recBtn=document.getElementById('rec');
+const nextBtn=document.getElementById('next');
+
+recBtn.onclick=async()=>{ if(!rec||rec.state==='inactive') start(); else stop(); };
+
+async function start(){
+  if(!sessionStart) sessionStart = Date.now();
+  confirmed=interim=''; finalEl.textContent=''; live.textContent=''; setScore('');
+  if('webkitSpeechRecognition'in window||'SpeechRecognition'in window){
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    recog=new SR(); recog.lang=LANG_VOICE; recog.interimResults=true; recog.continuous=true;
+    recog.onresult=e=>{
+      let tmp=''; for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];
+        if(r.isFinal){confirmed+=r[0].transcript+'\n';}else{tmp+=r[0].transcript;}}
+      interim=tmp; live.textContent=interim; finalEl.textContent=confirmed;
+    };
+    try{recog.start(); recognizing=true;}catch{}
+  }
+  stream=await navigator.mediaDevices.getUserMedia({audio:true});
+  const mime=MediaRecorder.isTypeSupported('audio/webm')?'audio/webm':'audio/ogg';
+  rec=new MediaRecorder(stream,{mimeType:mime}); chunks=[];
+  rec.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};
+  rec.start(); timer=setInterval(sendChunk,3000);
+  recBtn.textContent='🟥 録音中';
+}
+async function stop(silent=false){
+  clearInterval(timer);
+  if(rec&&rec.state!=='inactive')rec.stop();
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  if(recognizing&&recog){try{recog.stop();}catch{} recognizing=false;}
+  if(!silent)recBtn.textContent='🎤 録音開始';
+  if(chunks.length&&!silent)await sendChunk();
+}
+function toBase64(blob){return new Promise((res,rej)=>{const r=new FileReader();r.onloadend=()=>res(r.result);r.onerror=rej;r.readAsDataURL(blob);});}
+async function sendChunk(){
+  if(!chunks.length)return;
+  const blob=new Blob(chunks.splice(0,chunks.length),{type:rec.mimeType});
+  const b64=await toBase64(blob);
+  const r=await fetch(STT_API,{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({base64:b64.split(',')[1],mime:rec.mimeType,language:LANG_WHISPER})});
+  const j=await r.json().catch(()=>({}));
+  if(j&&j.text){confirmed+=j.text+'\n'; finalEl.textContent=confirmed;}
+}
+
+/* ===== チェック（80%以上→合格／日本語訳表示／次へ有効） ===== */
+document.getElementById('grade').onclick=()=>{
+  const cand=normalize((confirmed||interim||'').trim());
+  const gold=normalize(items[idx]?.a||'');
+  const sim=similarity(cand,gold);
+  const ok=sim>=PASS_THRESHOLD;
+  setScore(ok?`合格（類似度 ${Math.round(sim*100)}%）`
+              :`残念💦（類似度 ${Math.round(sim*100)}%）\nあなたの回答: ${cand}\n模範解答: ${gold}`,
+           ok?'ok':'ng');
+  setNextEnabled(ok);
+
+  const ja = items[idx]?.j || '';
+  document.getElementById('jaText').textContent = ja || '（日本語訳は登録されていません）';
+  document.getElementById('jaCard').style.display='block';
+
+  if(ok){ passFlags[idx]=true; maybeShowTime(); }
+};
+function setScore(text,cls){const el=document.getElementById('score'); el.className=cls||''; el.textContent=text;}
+function setNextEnabled(b){ nextBtn.disabled = !b; }
+function normalize(s){return s.toLowerCase().replace(/[^\p{Letter}\p{Number}\s]/gu,'').replace(/\s+/g,' ').trim();}
+function similarity(a,b){const m=a.length,n=b.length;if(!m&&!n)return 1;const d=Array.from({length:m+1},(_,i)=>[i]);for(let j=1;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++){for(let j=1;j<=n;j++){const c=a[i-1]===b[j-1]?0:1;d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+c);}}const dist=d[m][n];return 1-dist/Math.max(m,n);}
+
+/* 次へ（合格時のみ） */
+nextBtn.onclick=()=>{ if(nextBtn.disabled) return; if(idx<items.length-1){ idx++; render(); } else { maybeShowTime(); nextBtn.disabled=true; } };
+
+/* 全問終了の時間表示 */
+function maybeShowTime(){
+  if(!sessionStart) return;
+  if(passFlags.every(Boolean)){
+    const ms=Date.now()-sessionStart;
+    const mm=String(Math.floor(ms/60000)).padStart(2,'0');
+    const ss=String(Math.floor((ms%60000)/1000)).padStart(2,'0');
+    document.getElementById('timeText').textContent=`全 ${items.length} 問を完了！ かかった時間：${mm}:${ss}`;
+    document.getElementById('timeCard').style.display='block';
+  }
+}
+</script>
