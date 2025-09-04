@@ -79,19 +79,64 @@ const LANG_VOICE='en-US';      // TTS/暫定字幕
 const LANG_WHISPER='en';       // Whisper
 const PASS_THRESHOLD = 0.80;   // 類似率 80%
 
-/* ===== CSV 読込 ===== */
-let items=[],idx=0, passFlags=[], sessionStart=null;
+/* ===== CSV 読込（堅牢版） ===== */
+let items = [], idx = 0, passFlags = [], sessionStart = null;
+
+function parseCSV(text){
+  const rows = [];
+  let row = [], cur = '', inQ = false;
+  for (let i = 0; i < text.length; i++){
+    const c = text[i], n = text[i+1];
+    if (inQ){
+      if (c === '"' && n === '"'){ cur += '"'; i++; }
+      else if (c === '"'){ inQ = false; }
+      else { cur += c; }
+    } else {
+      if (c === '"'){ inQ = true; }
+      else if (c === ','){ row.push(cur); cur = ''; }
+      else if (c === '\n'){ row.push(cur); rows.push(row); row = []; cur = ''; }
+      else if (c === '\r'){ /* skip */ }
+      else { cur += c; }
+    }
+  }
+  row.push(cur); rows.push(row);
+  return rows.filter(r => r.length && !(r.length===1 && r[0]===''));
+}
+
 (async function loadSheet(){
-  const csv=await (await fetch(SHEET_CSV,{cache:'no-store'})).text();
-  const rows=csv.trim().split(/\r?\n/).map(line=>line.match(/("([^"]|"")*"|[^,]*)/g).filter(s=>s!=='').map(s=>s.replace(/^"|"$/g,'').replace(/""/g,'"')));
-  const header=rows[0].map(h=>h.trim().toLowerCase());
-  const qi=header.indexOf('question'), ai=header.indexOf('answer');
-  const ji=header.indexOf('japanese'); // C列「Japanese」
-  if(qi<0||ai<0||rows.length<2) throw new Error('Sheet needs Question/Answer columns');
-  items=rows.slice(1).map(r=>({q:r[qi]||'', a:(r[ai]||'').toLowerCase(), j:(ji>=0? (r[ji]||''): '')}));
-  passFlags = items.map(()=>false);
-  idx=0; render();
-})().catch(e=>{document.getElementById('q').textContent='Load error: '+e.message;});
+  try{
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), 8000); // 8秒でタイムアウト
+    const res = await fetch(
+      'https://docs.google.com/spreadsheets/d/e/2PACX-1vRVC56sLRh94LTed5WD4sVkIojw00CTlBL7yPtJocPewWqQ-ODfFsmLx_k9BX3LOmNT8ztP4GwqJVfl/pub?gid=0&single=true&output=csv',
+      { cache: 'no-store', signal: ctrl.signal }
+    );
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const csv = await res.text();
+
+    const rows = parseCSV(csv);
+    const header = rows[0].map(h=>String(h).trim().toLowerCase());
+    const qi = header.indexOf('question');
+    const ai = header.indexOf('answer');
+    const ji = header.indexOf('japanese'); // C列
+    if (qi < 0 || ai < 0) throw new Error('ヘッダに Question / Answer が見つかりません');
+
+    items = rows.slice(1).map(r => ({
+      q: r[qi] ?? '',
+      a: String(r[ai] ?? '').toLowerCase(),
+      j: ji >= 0 ? (r[ji] ?? '') : ''
+    }));
+    if (!items.length) throw new Error('データ行がありません');
+
+    passFlags = items.map(() => false);
+    idx = 0;
+    render();
+  }catch(e){
+    console.error('CSV load/parsing error:', e);
+    document.getElementById('q').textContent = 'Load error: ' + (e.name === 'AbortError' ? 'タイムアウト' : e.message);
+  }
+})();
 
 /* ===== 画面更新 ===== */
 function render(){
