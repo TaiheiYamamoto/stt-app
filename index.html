@@ -31,7 +31,7 @@
   <!-- 使い方 -->
   <header class="card">
     <div class="progress">使い方</div>
-    <div class="hint">① <span class="kbd">再生</span>で問題を聞く → ② <span class="kbd">録音開始</span>で答える → ③ <span class="kbd">チェック</span>で結果を見る</div>
+    <div class="hint">① <span class="kbd">再生</span>で問題を聞く → ② <span class="kbd">録音開始</span>で答える → ③ <span class="kbd">チェック</span>で結果を見る（合格すると「次へ」が有効）</div>
   </header>
 
   <!-- 出題 -->
@@ -39,7 +39,6 @@
     <div class="progress">問題 <span id="prog"></span></div>
     <h1 id="q">Loading...</h1>
 
-    <!-- アクション行：左端に「再生」、前へは削除 -->
     <div class="row" style="margin-top:8px">
       <button id="play" class="btn btn-ghost">🔊 再生</button>
       <button id="rec"  class="btn btn-primary btn-wide">🎤 録音開始</button>
@@ -80,61 +79,44 @@ const LANG_WHISPER='en';       // Whisper
 const PASS_THRESHOLD = 0.80;   // 類似率 80%
 
 /* ===== CSV 読込（堅牢版） ===== */
-let items = [], idx = 0, passFlags = [], sessionStart = null;
+let items=[],idx=0, passFlags=[], sessionStart=null;
 
 function parseCSV(text){
-  const rows = [];
-  let row = [], cur = '', inQ = false;
-  for (let i = 0; i < text.length; i++){
-    const c = text[i], n = text[i+1];
-    if (inQ){
-      if (c === '"' && n === '"'){ cur += '"'; i++; }
-      else if (c === '"'){ inQ = false; }
-      else { cur += c; }
-    } else {
-      if (c === '"'){ inQ = true; }
-      else if (c === ','){ row.push(cur); cur = ''; }
-      else if (c === '\n'){ row.push(cur); rows.push(row); row = []; cur = ''; }
-      else if (c === '\r'){ /* skip */ }
-      else { cur += c; }
+  const rows=[]; let row=[], cur='', inQ=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i], n=text[i+1];
+    if(inQ){
+      if(c==='"' && n==='"'){cur+='"'; i++;}
+      else if(c==='"'){inQ=false;}
+      else{cur+=c;}
+    }else{
+      if(c==='"'){inQ=true;}
+      else if(c===','){row.push(cur); cur='';}
+      else if(c==='\n'){row.push(cur); rows.push(row); row=[]; cur='';}
+      else if(c==='\r'){/* skip */}
+      else{cur+=c;}
     }
   }
   row.push(cur); rows.push(row);
-  return rows.filter(r => r.length && !(r.length===1 && r[0]===''));
+  return rows.filter(r=>r.length && !(r.length===1 && r[0]===''));
 }
 
 (async function loadSheet(){
   try{
-    const ctrl = new AbortController();
-    const t = setTimeout(()=>ctrl.abort(), 8000); // 8秒でタイムアウト
-    const res = await fetch(
-      'https://docs.google.com/spreadsheets/d/e/2PACX-1vRVC56sLRh94LTed5WD4sVkIojw00CTlBL7yPtJocPewWqQ-ODfFsmLx_k9BX3LOmNT8ztP4GwqJVfl/pub?gid=0&single=true&output=csv',
-      { cache: 'no-store', signal: ctrl.signal }
-    );
-    clearTimeout(t);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await fetch(SHEET_CSV,{cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const csv = await res.text();
-
     const rows = parseCSV(csv);
     const header = rows[0].map(h=>String(h).trim().toLowerCase());
-    const qi = header.indexOf('question');
-    const ai = header.indexOf('answer');
-    const ji = header.indexOf('japanese'); // C列
-    if (qi < 0 || ai < 0) throw new Error('ヘッダに Question / Answer が見つかりません');
-
-    items = rows.slice(1).map(r => ({
-      q: r[qi] ?? '',
-      a: String(r[ai] ?? '').toLowerCase(),
-      j: ji >= 0 ? (r[ji] ?? '') : ''
-    }));
-    if (!items.length) throw new Error('データ行がありません');
-
-    passFlags = items.map(() => false);
-    idx = 0;
-    render();
+    const qi=header.indexOf('question'), ai=header.indexOf('answer'), ji=header.indexOf('japanese');
+    if(qi<0||ai<0) throw new Error('ヘッダに Question / Answer が見つかりません');
+    items = rows.slice(1).map(r=>({ q:r[qi]??'', a:String(r[ai]??'').toLowerCase(), j: ji>=0 ? (r[ji]??'') : '' }));
+    if(!items.length) throw new Error('データ行がありません');
+    passFlags = items.map(()=>false);
+    idx=0; render();
   }catch(e){
     console.error('CSV load/parsing error:', e);
-    document.getElementById('q').textContent = 'Load error: ' + (e.name === 'AbortError' ? 'タイムアウト' : e.message);
+    document.getElementById('q').textContent='Load error: '+e.message;
   }
 })();
 
@@ -145,17 +127,14 @@ function render(){
   document.getElementById('q').textContent=items[idx]?.q||'(no question)';
   document.getElementById('prog').textContent=total?`${idx+1}/${total}`:'';
   setScore(''); setNextEnabled(false);
-  // 日本語訳と時間表示は一旦隠す
   document.getElementById('jaCard').style.display='none';
 }
 
 /* ===== TTS（再生・自然な声の選択） ===== */
 let preferredVoice=null;
 function chooseVoice(lang){
-  const list = speechSynthesis.getVoices().filter(v=>v.lang && v.lang.startsWith(lang));
-  // Google系や"Natural/Premium"を優先
-  const fav = list.find(v=>/google|natural|premium/i.test(v.name)) || list[0] || null;
-  return fav;
+  const list=speechSynthesis.getVoices().filter(v=>v.lang&&v.lang.startsWith(lang));
+  return list.find(v=>/google|natural|premium/i.test(v.name)) || list[0] || null;
 }
 speechSynthesis.onvoiceschanged=()=>{ preferredVoice = chooseVoice(LANG_VOICE); };
 
@@ -164,8 +143,8 @@ document.getElementById('play').onclick=()=>{
   const u=new SpeechSynthesisUtterance(items[idx]?.q||'');
   u.lang=LANG_VOICE;
   if(!preferredVoice) preferredVoice = chooseVoice(LANG_VOICE);
-  if(preferredVoice) u.voice = preferredVoice;
-  u.rate = 1; u.pitch = 1; // 必要なら微調整
+  if(preferredVoice) u.voice=preferredVoice;
+  u.rate=1; u.pitch=1;
   speechSynthesis.cancel(); speechSynthesis.speak(u);
 };
 
@@ -179,7 +158,7 @@ const nextBtn=document.getElementById('next');
 recBtn.onclick=async()=>{ if(!rec||rec.state==='inactive') start(); else stop(); };
 
 async function start(){
-  if(!sessionStart) sessionStart = Date.now(); // セッション開始（初回録音）
+  if(!sessionStart) sessionStart = Date.now();
   confirmed=interim=''; finalEl.textContent=''; live.textContent=''; setScore('');
   if('webkitSpeechRecognition'in window||'SpeechRecognition'in window){
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -228,13 +207,11 @@ document.getElementById('grade').onclick=()=>{
            ok?'ok':'ng');
   setNextEnabled(ok);
 
-  // 日本語訳を表示
+  // 日本語訳
   const ja = items[idx]?.j || '';
-  const jaCard = document.getElementById('jaCard');
   document.getElementById('jaText').textContent = ja || '（日本語訳は登録されていません）';
-  jaCard.style.display = 'block';
+  document.getElementById('jaCard').style.display='block';
 
-  // 合格を記録し、全問クリアなら時間計測を表示
   if(ok){ passFlags[idx]=true; maybeShowTime(); }
 };
 function setScore(text,cls){const el=document.getElementById('score'); el.className=cls||''; el.textContent=text;}
@@ -243,7 +220,11 @@ function normalize(s){return s.toLowerCase().replace(/[^\p{Letter}\p{Number}\s]/
 function similarity(a,b){const m=a.length,n=b.length;if(!m&&!n)return 1;const d=Array.from({length:m+1},(_,i)=>[i]);for(let j=1;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++){for(let j=1;j<=n;j++){const c=a[i-1]===b[j-1]?0:1;d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+c);}}const dist=d[m][n];return 1-dist/Math.max(m,n);}
 
 /* ===== 次へ（合格時のみ押せる） ===== */
-nextBtn.onclick=()=>{ if(nextBtn.disabled) return; idx=(idx+1)%items.length; render(); };
+nextBtn.onclick=()=>{
+  if(nextBtn.disabled) return;
+  if(idx < items.length-1){ idx++; render(); }
+  else { maybeShowTime(); nextBtn.disabled = true; }
+};
 
 /* ===== 全問終了の時間表示 ===== */
 function maybeShowTime(){
@@ -252,9 +233,8 @@ function maybeShowTime(){
     const ms = Date.now() - sessionStart;
     const mm = String(Math.floor(ms/60000)).padStart(2,'0');
     const ss = String(Math.floor((ms%60000)/1000)).padStart(2,'0');
-    const timeCard = document.getElementById('timeCard');
     document.getElementById('timeText').textContent = `全 ${items.length} 問を完了！ かかった時間：${mm}:${ss}`;
-    timeCard.style.display = 'block';
+    document.getElementById('timeCard').style.display = 'block';
   }
 }
 </script>
